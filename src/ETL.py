@@ -34,22 +34,13 @@ ESTADO_MAP = {
 class ETLPipeline:
     def __init__(self, excel_path):
         self.excel_path = excel_path
-        self.engine = None
+        self.engine = create_engine(DATABASE_URL)
         self.df = None
         self.imported_records = 0
         self.not_imported_records = []
         self.tipos_contato = {}
         self.planos = {}
         self.status_contratos = {}
-
-    def connect_to_database(self):
-        try:
-            self.engine = create_engine(DATABASE_URL)
-            print("Conexão com o banco de dados estabelecida com sucesso.")
-            return True
-        except Exception as e:
-            print(f"Erro ao conectar ao banco de dados: {e}")
-            return False
 
     def load_excel_data(self):
         try:
@@ -59,64 +50,148 @@ class ETLPipeline:
         except Exception as e:
             print(f"Erro ao carregar arquivo Excel: {e}")
             return False
+        
+    # Limpeza dos Dados   
 
     def clean_data(self):
-        # Padroniza colunas
         self.df.columns = [col.strip() for col in self.df.columns]
-        # Substitui NaN por None
         self.df = self.df.replace({np.nan: None})
-        # Limpa CPF/CNPJ
+
         if 'CPF/CNPJ' in self.df.columns:
             self.df['CPF/CNPJ'] = self.df['CPF/CNPJ'].apply(
                 lambda x: re.sub(r'[^\d]', '', str(x)) if x else None
             )
-        # Converte datas e trata NaT -> None
-        date_columns = ['Data Nasc.', 'Data Cadastro']
-        for col in date_columns:
-            if col in self.df.columns:
-                # Converte para datetime e depois para objeto Python datetime ou None
-                self.df[col] = pd.to_datetime(self.df[col], errors='coerce')
-                # Importante: substitui explicitamente NaT por None
-                self.df[col] = self.df[col].where(pd.notna(self.df[col]), None)
-        # Converte numéricos
+
+        if 'Data Nasc.' in self.df.columns:
+            self.df['Data Nasc.'] = pd.to_datetime(self.df['Data Nasc.'], errors='coerce')
+            self.df['Data Nasc.'] = self.df['Data Nasc.'].where(pd.notna(self.df['Data Nasc.']), None)
+
+        if 'Data Cadastro' in self.df.columns:
+            self.df['Data Cadastro'] = pd.to_datetime(self.df['Data Cadastro'], errors='coerce')
+            self.df['Data Cadastro'] = self.df['Data Cadastro'].where(
+                pd.notna(self.df['Data Cadastro']), datetime.now()
+            )
+
         if 'Plano Valor' in self.df.columns:
             self.df['Plano Valor'] = pd.to_numeric(self.df['Plano Valor'], errors='coerce')
             self.df['Plano Valor'] = self.df['Plano Valor'].where(pd.notna(self.df['Plano Valor']), None)
+
         if 'Vencimento' in self.df.columns:
             self.df['Vencimento'] = pd.to_numeric(self.df['Vencimento'], errors='coerce')
             self.df['Vencimento'] = self.df['Vencimento'].where(pd.notna(self.df['Vencimento']), None)
+
         if 'Isento' in self.df.columns:
             self.df['Isento'] = self.df['Isento'].apply(
                 lambda x: True if x == 1 or str(x).lower() == 'true' else False
             )
-        # Converte nomes de estados para siglas
+
         if 'UF' in self.df.columns:
             self.df['UF'] = self.df['UF'].map(ESTADO_MAP)
-        print("Dados limpos e preparados para importação")
-        return True
 
-    def setup_database_lookups(self):
-        with self.engine.connect() as conn:
-            # tipos_contato
-            result = conn.execute(text("SELECT id, tipo_contato FROM tbl_tipos_contato"))
-            self.tipos_contato = {}
-            for id_, tipo_raw in result:
-                key = re.sub(r'[^a-z]', '', tipo_raw.lower())
-                self.tipos_contato[key] = id_
-            for tipo in ['celular', 'telefone', 'email']:
-                if tipo not in self.tipos_contato:
-                    novo_id = conn.execute(
-                        text("INSERT INTO tbl_tipos_contato (tipo_contato) VALUES (:tipo) RETURNING id"),
-                        {"tipo": tipo.capitalize()}
-                    ).scalar()
-                    self.tipos_contato[tipo] = novo_id
-            # planos
-            result = conn.execute(text("SELECT id, descricao FROM tbl_planos"))
-            self.planos = {row[1]: row[0] for row in result}
-            # status_contrato
-            result = conn.execute(text("SELECT id, status FROM tbl_status_contrato"))
-            self.status_contratos = {row[1]: row[0] for row in result}
-        print("Configuração de lookups concluída")
+        print("Dados limpos e preparados para importacao")
+        return True
+    
+    # Inserts/Updates dos dados no Banco
+
+    def process_data(self):
+        if self.df is None or self.df.empty:
+            print("Não há dados para processar")
+            return
+
+        for idx, row in self.df.iterrows():
+            try:
+                cpf_cnpj = row.get('CPF/CNPJ')
+                if not cpf_cnpj:
+                    raise ValueError("CPF/CNPJ ausente ou inválido")
+
+                with self.engine.begin() as conn:
+                    row_cliente = conn.execute(
+                        text("SELECT id FROM tbl_clientes WHERE cpf_cnpj = :cpf_cnpj"),
+                        {"cpf_cnpj": cpf_cnpj}
+                    ).fetchone()
+
+                    cliente_id = row_cliente[0] if row_cliente else None
+
+                    if not cliente_id:
+                        nome = row.get('Nome/Razão Social') or row.get('Nome Razão Social')
+                        if not nome:
+                            raise ValueError("Nome/Razão Social ausente")
+
+                        cliente_id = conn.execute(
+                            text("""
+                                INSERT INTO tbl_clientes
+                                (nome_razao_social, nome_fantasia, cpf_cnpj, data_nascimento, data_cadastro)
+                                VALUES (:nome, :fantasia, :cpf_cnpj, :data_nasc, :data_cad)
+                                RETURNING id
+                            """),
+                            {
+                                "nome": nome,
+                                "fantasia": row.get('Nome Fantasia'),
+                                "cpf_cnpj": cpf_cnpj,
+                                "data_nasc": row.get('Data Nasc.'),
+                                "data_cad": row.get('Data Cadastro')
+                            }
+                        ).scalar()
+
+                plano_valor = row.get('Plano Valor')
+                dia_vencimento = row.get('Vencimento')
+                plano_id = self.get_or_create_plano(row.get('Plano'), plano_valor)
+                status_id = self.get_or_create_status(row.get('Status'))
+                endereco_valido = row.get('Endereço') if not pd.isna(row.get('Endereço')) and row.get('Endereço') != '' else "Endereço não informado"
+
+                params = {
+                    "cliente_id": cliente_id,
+                    "plano_id": plano_id,
+                    "dia_vencimento": dia_vencimento,
+                    "isento": row.get('Isento'),
+                    "endereco": endereco_valido,
+                    "numero": row.get('Número'),
+                    "complemento": row.get('Complemento'),
+                    "bairro": row.get('Bairro'),
+                    "cep": row.get('CEP') or '',
+                    "cidade": row.get('Cidade'),
+                    "uf": row.get('UF'),
+                    "status_id": status_id
+                }
+
+                with self.engine.begin() as conn:
+                    existing = conn.execute(
+                        text("SELECT id FROM tbl_cliente_contratos WHERE cliente_id=:cliente_id AND plano_id=:plano_id"),
+                        {"cliente_id": cliente_id, "plano_id": plano_id}
+                    ).fetchone()
+
+                    if existing:
+                        params["id"] = existing[0]
+                        conn.execute(
+                            text("""
+                                UPDATE tbl_cliente_contratos
+                                SET dia_vencimento=:dia_vencimento, isento=:isento,
+                                    endereco_logradouro=:endereco, endereco_numero=:numero,
+                                    endereco_complemento=:complemento, endereco_bairro=:bairro,
+                                    endereco_cep=:cep, endereco_cidade=:cidade, endereco_uf=:uf,
+                                    status_id=:status_id
+                                WHERE id=:id
+                            """), params)
+                    else:
+                        conn.execute(
+                            text("""
+                                INSERT INTO tbl_cliente_contratos
+                                (cliente_id, plano_id, dia_vencimento, isento,
+                                 endereco_logradouro, endereco_numero, endereco_complemento,
+                                 endereco_bairro, endereco_cep, endereco_cidade, endereco_uf,
+                                 status_id)
+                                VALUES
+                                (:cliente_id, :plano_id, :dia_vencimento, :isento,
+                                 :endereco, :numero, :complemento,
+                                 :bairro, :cep, :cidade, :uf,
+                                 :status_id)
+                            """), params)
+
+                self.imported_records += 1
+                print(f"Linha {idx+2} importada com sucesso.")
+            except Exception as e:
+                self.not_imported_records.append({"row": idx+2, "reason": str(e), "data": row.to_dict()})
+                print(f"Erro na linha {idx+2}: {e}")
 
     def get_or_create_status(self, status):
         if not status:
@@ -145,152 +220,31 @@ class ETLPipeline:
             conn.commit()
             self.planos[descricao] = new
             return new
+        
+# Função para ajustar os lookups
 
-    def get_cliente_by_cpf_cnpj(self, cpf_cnpj):
-        if not cpf_cnpj:
-            return None
+    def setup_database_lookups(self):
         with self.engine.connect() as conn:
-            row = conn.execute(
-                text("SELECT id FROM tbl_clientes WHERE cpf_cnpj = :cpf_cnpj"),
-                {"cpf_cnpj": cpf_cnpj}
-            ).fetchone()
-            return row[0] if row else None
+            result = conn.execute(text("SELECT id, tipo_contato FROM tbl_tipos_contato"))
+            self.tipos_contato = {}
+            for id_, tipo_raw in result:
+                key = re.sub(r'[^a-z]', '', tipo_raw.lower())
+                self.tipos_contato[key] = id_
+            for tipo in ['celular', 'telefone', 'email']:
+                if tipo not in self.tipos_contato:
+                    novo_id = conn.execute(
+                        text("INSERT INTO tbl_tipos_contato (tipo_contato) VALUES (:tipo) RETURNING id"),
+                        {"tipo": tipo.capitalize()}
+                    ).scalar()
+                    self.tipos_contato[tipo] = novo_id
+            result = conn.execute(text("SELECT id, descricao FROM tbl_planos"))
+            self.planos = {row[1]: row[0] for row in result}
+            result = conn.execute(text("SELECT id, status FROM tbl_status_contrato"))
+            self.status_contratos = {row[1]: row[0] for row in result}
+        print("Configuração de lookups concluída")
 
-    def add_contato(self, cliente_id, tipo, contato):
-        if not cliente_id or not contato:
-            return
-        tipo_id = self.tipos_contato.get(tipo)
-        if not tipo_id:
-            print(f"Tipo de contato desconhecido: {tipo}")
-            return
-        with self.engine.connect() as conn:
-            exists = conn.execute(
-                text("SELECT 1 FROM tbl_cliente_contatos WHERE cliente_id=:cliente_id AND tipo_contato_id=:tipo_id AND contato=:contato"),
-                {"cliente_id": cliente_id, "tipo_id": tipo_id, "contato": contato}
-            ).fetchone()
-            if not exists:
-                conn.execute(
-                    text("INSERT INTO tbl_cliente_contatos (cliente_id, tipo_contato_id, contato) VALUES (:cliente_id, :tipo_id, :contato)"),
-                    {"cliente_id": cliente_id, "tipo_id": tipo_id, "contato": contato}
-                )
-                conn.commit()
 
-    def process_data(self):
-        if self.df is None or self.df.empty:
-            print("Não há dados para processar")
-            return
-        self.setup_database_lookups()
-        for idx, row in self.df.iterrows():
-            try:
-                cpf_cnpj = row.get('CPF/CNPJ')
-                if not cpf_cnpj:
-                    raise ValueError("CPF/CNPJ ausente ou inválido")
-                cliente_id = self.get_cliente_by_cpf_cnpj(cpf_cnpj)
-                if not cliente_id:
-                    nome = row.get('Nome/Razão Social') or row.get('Nome Razão Social')
-                    if not nome:
-                        raise ValueError("Nome/Razão Social ausente")
-                    
-                    # Garantir que data_nasc seja None se for NaT ou inválido
-                    data_nasc = row.get('Data Nasc.')
-                    if pd.isna(data_nasc) or data_nasc is None:
-                        data_nasc = None
-                    
-                    # Garantir que data_cad seja uma data válida ou use o momento atual
-                    data_cad = row.get('Data Cadastro')
-                    if pd.isna(data_cad) or data_cad is None:
-                        data_cad = datetime.now()
-                    
-                    with self.engine.connect() as conn:
-                        cliente_id = conn.execute(
-                            text("""
-                                INSERT INTO tbl_clientes
-                                (nome_razao_social, nome_fantasia, cpf_cnpj, data_nascimento, data_cadastro)
-                                VALUES (:nome, :fantasia, :cpf_cnpj, :data_nasc, :data_cad)
-                                RETURNING id
-                            """),
-                            {
-                                "nome": nome,
-                                "fantasia": row.get('Nome Fantasia'),
-                                "cpf_cnpj": cpf_cnpj,
-                                "data_nasc": data_nasc,
-                                "data_cad": data_cad
-                            }
-                        ).scalar()
-                        conn.commit()
-                # contatos
-                for campo, tipo in [('Celulares', 'celular'), ('Telefones', 'telefone'), ('Emails', 'email')]:
-                    if row.get(campo):
-                        for item in str(row[campo]).split(','):
-                            contato_valor = item.strip()
-                            if contato_valor:  # Verificar se o contato não está vazio
-                                self.add_contato(cliente_id, tipo, contato_valor)
-                
-                # Verificar valores antes de criar contratos
-                plano_valor = row.get('Plano Valor')
-                if pd.isna(plano_valor):
-                    plano_valor = None
-                
-                dia_vencimento = row.get('Vencimento')
-                if pd.isna(dia_vencimento):
-                    dia_vencimento = None
-                
-                # contratos
-                plano_id = self.get_or_create_plano(row.get('Plano'), plano_valor)
-                status_id = self.get_or_create_status(row.get('Status'))
-                cep = row.get('CEP') or ''
-                params = {
-                    "cliente_id": cliente_id,
-                    "plano_id": plano_id,
-                    "dia_vencimento": dia_vencimento,
-                    "isento": row.get('Isento'),
-                    "endereco": row.get('Endereço'),
-                    "numero": row.get('Número'),
-                    "complemento": row.get('Complemento'),
-                    "bairro": row.get('Bairro'),
-                    "cep": cep,
-                    "cidade": row.get('Cidade'),
-                    "uf": row.get('UF'),
-                    "status_id": status_id
-                }
-                with self.engine.connect() as conn:
-                    existing = conn.execute(
-                        text("SELECT id FROM tbl_cliente_contratos WHERE cliente_id=:cliente_id AND plano_id=:plano_id"),
-                        {"cliente_id": cliente_id, "plano_id": plano_id}
-                    ).fetchone()
-                    if existing:
-                        params["id"] = existing[0]
-                        conn.execute(
-                            text("""
-                                UPDATE tbl_cliente_contratos
-                                SET dia_vencimento=:dia_vencimento, isento=:isento,
-                                    endereco_logradouro=:endereco, endereco_numero=:numero,
-                                    endereco_complemento=:complemento, endereco_bairro=:bairro,
-                                    endereco_cep=:cep, endereco_cidade=:cidade, endereco_uf=:uf,
-                                    status_id=:status_id
-                                WHERE id=:id
-                            """), params)
-                    else:
-                        conn.execute(
-                            text("""
-                                INSERT INTO tbl_cliente_contratos
-                                (cliente_id, plano_id, dia_vencimento, isento,
-                                 endereco_logradouro, endereco_numero, endereco_complemento,
-                                 endereco_bairro, endereco_cep, endereco_cidade, endereco_uf,
-                                 status_id)
-                                VALUES
-                                (:cliente_id, :plano_id, :dia_vencimento, :isento,
-                                 :endereco, :numero, :complemento,
-                                 :bairro, :cep, :cidade, :uf,
-                                 :status_id)
-                            """), params)
-                    conn.commit()
-                self.imported_records += 1
-                print(f"Linha {idx+2} importada com sucesso.")
-            except Exception as e:
-                self.not_imported_records.append({"row": idx+2, "reason": str(e), "data": row.to_dict()})
-                print(f"Erro na linha {idx+2}: {e}")
-
+# Função do relatório da ETL
     def generate_report(self):
         print("\n" + "="*40)
         print("RELATÓRIO DE IMPORTAÇÃO")
@@ -308,19 +262,19 @@ class ETLPipeline:
                 f.write(f"Linha {r['row']}: {r['reason']}\n")
         print("Relatório gerado.")
 
+# Função do fluxo da ETL
     def run(self):
-        if not self.connect_to_database(): return False
         if not self.load_excel_data(): return False
         if not self.clean_data(): return False
+        self.setup_database_lookups()
         self.process_data()
         self.generate_report()
         return True
+
+
 
 if __name__ == "__main__":
     excel_path = os.getenv('EXCEL_PATH', 'C:/Users/PICHAU/Documents/TSMX/dataset/dados_importacao.xlsx')
     etl = ETLPipeline(excel_path)
     result = etl.run()
-    if result:
-        print("Processo de ETL concluído com sucesso")
-    else:
-        print("Processo de ETL falhou")
+    print("Processo de ETL concluído com sucesso" if result else "Processo de ETL falhou")
