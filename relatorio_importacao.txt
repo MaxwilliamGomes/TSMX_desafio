@@ -1,0 +1,36 @@
+RELATÓRIO DE IMPORTAÇÃO
+Total: 1200, Sucesso: 1198, Falha: 2
+Linha 187: (psycopg2.errors.NotNullViolation) ERRO:  o valor nulo na coluna "endereco_logradouro" da relação "tbl_cliente_contratos" viola a restrição de não-nulo
+DETAIL:  Registro que falhou contém (796, 792, 3, 25, f, null, 9, Barão Homem De Melo 1ª Seção, Cardoso, lote 625 quadra 20, 30760563, SE, 2).
+
+[SQL: 
+                                INSERT INTO tbl_cliente_contratos
+                                (cliente_id, plano_id, dia_vencimento, isento,
+                                 endereco_logradouro, endereco_numero, endereco_complemento,
+                                 endereco_bairro, endereco_cep, endereco_cidade, endereco_uf,
+                                 status_id)
+                                VALUES
+                                (%(cliente_id)s, %(plano_id)s, %(dia_vencimento)s, %(isento)s,
+                                 %(endereco)s, %(numero)s, %(complemento)s,
+                                 %(bairro)s, %(cep)s, %(cidade)s, %(uf)s,
+                                 %(status_id)s)
+                            ]
+[parameters: {'cliente_id': 792, 'plano_id': 3, 'dia_vencimento': 25, 'isento': False, 'endereco': None, 'numero': 9, 'complemento': 'lote 625 quadra 20', 'bairro': 'Barão Homem De Melo 1ª Seção', 'cep': 30760563, 'cidade': 'Cardoso', 'uf': 'SE', 'status_id': 2}]
+(Background on this error at: https://sqlalche.me/e/20/gkpj)
+Linha 680: (psycopg2.errors.NotNullViolation) ERRO:  o valor nulo na coluna "endereco_logradouro" da relação "tbl_cliente_contratos" viola a restrição de não-nulo
+DETAIL:  Registro que falhou contém (998, 994, 3, 5, f, null, 590, Vila Copasa, Lima, Lote 356 Quadra 13, 94738402, RS, 2).
+
+[SQL: 
+                                INSERT INTO tbl_cliente_contratos
+                                (cliente_id, plano_id, dia_vencimento, isento,
+                                 endereco_logradouro, endereco_numero, endereco_complemento,
+                                 endereco_bairro, endereco_cep, endereco_cidade, endereco_uf,
+                                 status_id)
+                                VALUES
+                                (%(cliente_id)s, %(plano_id)s, %(dia_vencimento)s, %(isento)s,
+                                 %(endereco)s, %(numero)s, %(complemento)s,
+                                 %(bairro)s, %(cep)s, %(cidade)s, %(uf)s,
+                                 %(status_id)s)
+                            ]
+[parameters: {'cliente_id': 994, 'plano_id': 3, 'dia_vencimento': 5, 'isento': False, 'endereco': None, 'numero': 590, 'complemento': 'Lote 356 Quadra 13', 'bairro': 'Vila Copasa', 'cep': 94738402, 'cidade': 'Lima', 'uf': 'RS', 'status_id': 2}]
+(Background on this error at: https://sqlalche.me/e/20/gkpj)
